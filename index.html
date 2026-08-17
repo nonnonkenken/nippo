@@ -145,6 +145,7 @@ html,body{height:100%;font-family:var(--font);background:var(--bg);color:var(--t
     </div>
     <div id="sec-rireki" class="section">
       <div class="field"><input type="month" id="filter-month" style="width:100%;padding:12px 14px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg2);color:var(--text);font-size:16px;font-family:var(--font);-webkit-appearance:none;outline:none"></div>
+      <div style="text-align:right;margin-bottom:10px"><span onclick="migrateFromIndexedDB()" style="font-size:12px;color:var(--text2);cursor:pointer;text-decoration:underline">🔄 この端末に残っている旧データを復元</span></div>
       <div id="nippo-list"></div>
     </div>
     <div id="sec-shukko" class="section">
@@ -289,6 +290,64 @@ function savePhotosForNippo(nippoId, dataUrls) {
 
 function getPhotosForNippo(nippoId) {
   return window.NippoDB.getPhotos(nippoId);
+}
+
+// ========== 旧データ移行（この端末のIndexedDBに残っている過去データをFirestoreへ） ==========
+async function migrateFromIndexedDB() {
+  if (!confirm('この端末（ブラウザ）に残っている過去の日報データを探して、見つかればクラウドに移行します。よろしいですか？')) return;
+  showToast('確認中...');
+  try {
+    const oldDb = await new Promise((resolve, reject) => {
+      const req = indexedDB.open('nippo_db', 2);
+      req.onsuccess = e => resolve(e.target.result);
+      req.onerror = () => reject(req.error);
+      req.onupgradeneeded = e => {
+        // 旧データが存在しない場合はここに来る。空のまま作成するだけで何もしない。
+        const d = e.target.result;
+        if (!d.objectStoreNames.contains('nippo')) d.createObjectStore('nippo', { keyPath: 'id' });
+        if (!d.objectStoreNames.contains('nippo_photos')) d.createObjectStore('nippo_photos', { keyPath: 'id', autoIncrement: true }).createIndex('nippoId', 'nippoId', { unique: false });
+      };
+    });
+    if (!oldDb.objectStoreNames.contains('nippo')) {
+      showToast('この端末に旧データは見つかりませんでした');
+      oldDb.close();
+      return;
+    }
+    const oldRecords = await new Promise((resolve, reject) => {
+      const tx = oldDb.transaction('nippo', 'readonly');
+      const req = tx.objectStore('nippo').getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => reject(req.error);
+    });
+    let oldPhotos = [];
+    if (oldDb.objectStoreNames.contains('nippo_photos')) {
+      oldPhotos = await new Promise((resolve, reject) => {
+        const tx = oldDb.transaction('nippo_photos', 'readonly');
+        const req = tx.objectStore('nippo_photos').getAll();
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = () => reject(req.error);
+      });
+    }
+    oldDb.close();
+    if (!oldRecords.length) {
+      showToast('この端末に旧データは見つかりませんでした');
+      return;
+    }
+    const existing = await getAllRecords();
+    const existingIds = new Set(existing.map(r => r.id));
+    let migrated = 0;
+    for (const r of oldRecords) {
+      if (existingIds.has(r.id)) continue;
+      await putRecord(r);
+      const photos = oldPhotos.filter(p => p.nippoId === r.id).map(p => p.dataUrl);
+      if (photos.length) await savePhotosForNippo(r.id, photos);
+      migrated++;
+    }
+    showToast(migrated > 0 ? `${migrated}件の旧データを復元しました` : '新しく復元するデータはありませんでした（すでに移行済み）');
+    renderList();
+  } catch (e) {
+    alert('復元エラー: ' + e.message);
+  }
 }
 
 // ========== 写真処理 ==========
