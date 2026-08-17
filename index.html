@@ -188,88 +188,112 @@ html,body{height:100%;font-family:var(--font);background:var(--bg);color:var(--t
   </div>
 </div>
 <div id="toast" class="toast"></div>
+<div id="sync-badge" style="position:fixed;top:10px;right:10px;font-size:11px;padding:4px 10px;border-radius:20px;background:var(--bg3);color:var(--text2);z-index:300;display:none">🔄 準備中...</div>
 
 <script>
-// ========== DB ==========
-let db = null;
+// dbReady: Firebaseモジュールの初期化完了を待つためのPromise
+window._dbReadyResolve = null;
+window.dbReady = new Promise(res => { window._dbReadyResolve = res; });
+</script>
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
+import {
+  getFirestore, collection, doc, setDoc, getDocs, deleteDoc,
+  query, where, addDoc, onSnapshot
+} from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyBwXYvEanU3XtxO5BaHz8l11vUPWk5ZyJI",
+  authDomain: "nippo-app-987bd.firebaseapp.com",
+  projectId: "nippo-app-987bd",
+  storageBucket: "nippo-app-987bd.firebasestorage.app",
+  messagingSenderId: "882797862357",
+  appId: "1:882797862357:web:2a8d655fff22f2faed315c"
+};
+
+const app = initializeApp(firebaseConfig);
+const fsdb = getFirestore(app);
+
+window.NippoDB = {
+  async getAllRecords() {
+    const snap = await getDocs(collection(fsdb, 'nippo'));
+    return snap.docs.map(d => d.data());
+  },
+  async putRecord(record) {
+    await setDoc(doc(fsdb, 'nippo', String(record.id)), record);
+    return record.id;
+  },
+  async deleteRecord(id) {
+    await deleteDoc(doc(fsdb, 'nippo', String(id)));
+    const q = query(collection(fsdb, 'nippo_photos'), where('nippoId', '==', id));
+    const snap = await getDocs(q);
+    await Promise.all(snap.docs.map(d => deleteDoc(d.ref)));
+  },
+  async savePhotos(nippoId, dataUrls) {
+    if (!dataUrls.length) return;
+    await Promise.all(dataUrls.map(url => addDoc(collection(fsdb, 'nippo_photos'), { nippoId, dataUrl: url })));
+  },
+  async getPhotos(nippoId) {
+    const q = query(collection(fsdb, 'nippo_photos'), where('nippoId', '==', nippoId));
+    const snap = await getDocs(q);
+    return snap.docs.map(d => d.data().dataUrl);
+  },
+  // 他の端末で変更があったら自動でコールバックを呼ぶ（リアルタイム同期）
+  watch(callback) {
+    return onSnapshot(collection(fsdb, 'nippo'), () => callback(), (err) => {
+      console.error('sync error', err);
+    });
+  }
+};
+
+window._dbReadyResolve();
+</script>
+<script>
+// ========== DB（Firestoreへの薄いラッパー。関数名は元のIndexedDB版と同じにしてある） ==========
 let currentModalId = null;
 let photos = []; // {file, dataUrl} の配列
+let isRemoteUpdate = false;
 
-function initDB() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open('nippo_db', 2);
-    req.onupgradeneeded = e => {
-      const d = e.target.result;
-      if (!d.objectStoreNames.contains('nippo')) {
-        d.createObjectStore('nippo', { keyPath: 'id' });
-      }
-      if (!d.objectStoreNames.contains('photos')) {
-        d.createObjectStore('photos', { keyPath: 'id', autoIncrement: true });
-        d.createObjectStore('nippo_photos', { keyPath: 'id', autoIncrement: true })
-          .createIndex('nippoId', 'nippoId', { unique: false });
-      }
-    };
-    req.onsuccess = e => { db = e.target.result; resolve(); };
-    req.onerror = () => reject(req.error);
+async function initDB() {
+  const badge = document.getElementById('sync-badge');
+  badge.style.display = 'block';
+  badge.textContent = '🔄 クラウド接続中...';
+  await window.dbReady;
+  badge.textContent = '☁️ 同期中';
+  setTimeout(() => { badge.style.display = 'none'; }, 2000);
+
+  // 他端末からの変更をリアルタイムで受け取る
+  window.NippoDB.watch(() => {
+    const activeTab = document.querySelector('.tab.active');
+    if (activeTab && activeTab.textContent === '履歴') {
+      renderList();
+    }
   });
 }
 
 function getAllRecords() {
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('nippo', 'readonly');
-    const req = tx.objectStore('nippo').getAll();
-    req.onsuccess = () => resolve(req.result || []);
-    req.onerror = () => reject(req.error);
-  });
+  return window.NippoDB.getAllRecords();
 }
 
 function putRecord(record) {
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('nippo', 'readwrite');
-    const req = tx.objectStore('nippo').put(record);
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
+  return window.NippoDB.putRecord(record);
 }
 
 function deleteRecordDB(id) {
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(['nippo', 'nippo_photos'], 'readwrite');
-    tx.objectStore('nippo').delete(id);
-    const idx = tx.objectStore('nippo_photos').index('nippoId');
-    const req2 = idx.getAllKeys(id);
-    req2.onsuccess = () => {
-      req2.result.forEach(k => tx.objectStore('nippo_photos').delete(k));
-    };
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
+  return window.NippoDB.deleteRecord(id);
 }
 
 function savePhotosForNippo(nippoId, dataUrls) {
-  return new Promise((resolve, reject) => {
-    if (!dataUrls.length) { resolve(); return; }
-    const tx = db.transaction('nippo_photos', 'readwrite');
-    const store = tx.objectStore('nippo_photos');
-    dataUrls.forEach(url => store.add({ nippoId, dataUrl: url }));
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
+  return window.NippoDB.savePhotos(nippoId, dataUrls);
 }
 
 function getPhotosForNippo(nippoId) {
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('nippo_photos', 'readonly');
-    const idx = tx.objectStore('nippo_photos').index('nippoId');
-    const req = idx.getAll(nippoId);
-    req.onsuccess = () => resolve(req.result.map(r => r.dataUrl));
-    req.onerror = () => reject(req.error);
-  });
+  return window.NippoDB.getPhotos(nippoId);
 }
 
 // ========== 写真処理 ==========
 function compressImage(file, cb) {
-  const MAX = 1200, QUALITY = 0.72;
+  const MAX = 1000, QUALITY = 0.6; // Firestoreの1ドキュメント1MB制限に収まるよう調整
   const reader = new FileReader();
   reader.onload = e => {
     const img = new Image();
