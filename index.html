@@ -93,6 +93,21 @@ html,body{height:100%;font-family:var(--font);background:var(--bg);color:var(--t
 .toast{position:fixed;bottom:90px;left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:10px 20px;border-radius:20px;font-size:13px;font-weight:500;z-index:200;opacity:0;transition:opacity 0.2s;white-space:nowrap;pointer-events:none}
 .toast.show{opacity:1}
 .section{display:none}.section.active{display:block}
+.seg{display:flex;background:var(--bg2);border-radius:12px;padding:3px;margin-bottom:12px}
+.seg button{flex:1;padding:10px 4px;border:none;background:none;border-radius:9px;font-size:14px;font-weight:600;color:var(--text2);font-family:var(--font);cursor:pointer}
+.seg button.on{background:var(--bg);color:var(--text);box-shadow:0 1px 3px rgba(0,0,0,0.12)}
+.sk-period{font-size:13px;color:var(--text2);margin-bottom:12px;text-align:center}
+.sk-summary{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px}
+.sk-box{background:var(--bg2);border-radius:var(--radius-lg);padding:12px;text-align:center}
+.sk-box .n{font-size:22px;font-weight:700}
+.sk-box .l{font-size:11px;color:var(--text2);margin-top:2px}
+.sk-row{display:grid;grid-template-columns:1fr 48px 64px;gap:8px;padding:10px 0;border-bottom:1px solid var(--border);font-size:14px;align-items:center}
+.sk-row.head{font-size:11px;color:var(--text3);font-weight:600}
+.sk-row .r{text-align:right}
+.sk-sub{font-size:11px;color:var(--text3);margin-top:2px}
+.sk-set-row{display:grid;grid-template-columns:1fr 104px;gap:8px;margin-bottom:10px;align-items:center}
+.sk-set-row input,.sk-set-row select{width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg);color:var(--text);font-size:13px;font-family:var(--font);outline:none}
+.sk-warn{background:var(--bg2);border-radius:var(--radius);padding:10px 12px;font-size:12px;color:var(--danger);line-height:1.7;margin-top:12px}
 </style>
 </head>
 <body>
@@ -106,6 +121,7 @@ html,body{height:100%;font-family:var(--font);background:var(--bg);color:var(--t
       <div class="tab active" onclick="switchTab('nyuuryoku')">新規入力</div>
       <div class="tab" onclick="switchTab('rireki')">履歴</div>
       <div class="tab" onclick="switchTab('shukko')">出力</div>
+      <div class="tab" onclick="switchTab('shukei')">集計</div>
     </div>
   </div>
   <div class="content">
@@ -171,6 +187,21 @@ html,body{height:100%;font-family:var(--font);background:var(--bg);color:var(--t
         <div style="font-size:13px;color:var(--text2);line-height:1.8">① 「印刷用HTML出力」をタップ<br>② 共有ボタン（四角↑）をタップ<br>③「PDFを作成」を選択<br>④ iCloudやファイルアプリに保存</div>
       </div>
     </div>
+    <div id="sec-shukei" class="section">
+      <div class="field"><label>請求月</label><input type="month" id="sk-month"></div>
+      <div class="seg">
+        <button id="sk-t-end" class="on" onclick="skSetType('end')">月末締め</button>
+        <button id="sk-t-d20" onclick="skSetType('d20')">20日締め</button>
+      </div>
+      <div class="sk-period" id="sk-period"></div>
+      <div id="sk-result"></div>
+      <div class="section-card" style="margin-top:16px">
+        <div class="section-card-title">⚙️ 請求先・締め日の設定</div>
+        <div style="font-size:12px;color:var(--text3);margin-bottom:10px;line-height:1.6">この月に登場した現場の一覧です。「請求先名」を入れると、同じ請求先の現場をまとめて集計します（空欄なら現場名のまま）。締め日の初期値は月末締めです。</div>
+        <div id="sk-settings"></div>
+      </div>
+      <div id="sk-warn"></div>
+    </div>
   </div>
 </div>
 
@@ -199,7 +230,7 @@ window.dbReady = new Promise(res => { window._dbReadyResolve = res; });
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
 import {
-  getFirestore, collection, doc, setDoc, getDocs, deleteDoc,
+  getFirestore, collection, doc, setDoc, getDoc, getDocs, deleteDoc,
   query, where, addDoc, onSnapshot
 } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
 
@@ -238,6 +269,14 @@ window.NippoDB = {
     const q = query(collection(fsdb, 'nippo_photos'), where('nippoId', '==', nippoId));
     const snap = await getDocs(q);
     return snap.docs.map(d => d.data().dataUrl);
+  },
+  // 集計タブの設定（請求先・締め日）。nippo_settings コレクションに保存
+  async getSetting(key) {
+    const s = await getDoc(doc(fsdb, 'nippo_settings', key));
+    return s.exists() ? s.data() : null;
+  },
+  async putSetting(key, val) {
+    await setDoc(doc(fsdb, 'nippo_settings', key), val);
   },
   // 他の端末で変更があったら自動でコールバックを呼ぶ（リアルタイム同期）
   watch(callback) {
@@ -402,10 +441,11 @@ function handlePhotos(input) {
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
-  const idx = ['nyuuryoku', 'rireki', 'shukko'].indexOf(name);
+  const idx = ['nyuuryoku', 'rireki', 'shukko', 'shukei'].indexOf(name);
   document.querySelectorAll('.tab')[idx].classList.add('active');
   document.getElementById('sec-' + name).classList.add('active');
   if (name === 'rireki') renderList();
+  if (name === 'shukei') renderShukei();
 }
 
 function addWorker() {
@@ -631,6 +671,172 @@ async function exportPrint() {
   window.open(URL.createObjectURL(blob), '_blank');
 }
 
+// ========== 集計（請求先別・締め日別） ==========
+// SK-BEGIN
+const SK_KEY = 'nippo_closing_v1';
+let skSettings = {};   // { 現場名: { g: 請求先名, t: 'end' | 'd20' } }
+let skType = 'end';    // 'end' = 月末締め（1日〜末日） / 'd20' = 20日締め（前月21日〜当月20日）
+let skSiteList = [];
+
+function skNorm(s) { return (s || '').normalize('NFKC').replace(/\s+/g, ' ').trim(); }
+function skPad(n) { return String(n).padStart(2, '0'); }
+function skFmt(h) { return (Math.round(h * 10) / 10).toFixed(1); }
+
+function skTimes(s) {
+  return (skNorm(s).match(/\d{1,2}:\d{2}/g) || []).map(t => {
+    const p = t.split(':');
+    return Number(p[0]) + Number(p[1]) / 60;
+  });
+}
+
+// 1件の日報を「現場ごとの行」に分ける（1日に2現場ある日報にも対応）
+function skEntries(r) {
+  const st = skTimes(r.start), en = skTimes(r.end);
+  const n = Math.min(st.length, en.length);
+  const place = skNorm(r.place) || '場所未記入';
+  const hrs = [];
+  for (let i = 0; i < n; i++) hrs.push((en[i] - st[i] + 24) % 24);
+  if (n <= 1) return [{ date: r.date, site: place, hours: n ? hrs[0] : 0, warn: n ? '' : '時間が読み取れません' }];
+  const parts = place.split(' ').filter(Boolean);
+  if (parts.length === n) return parts.map((p, i) => ({ date: r.date, site: p, hours: hrs[i], warn: '' }));
+  return [{ date: r.date, site: place, hours: hrs.reduce((a, b) => a + b, 0), warn: '現場の区切りが不明なため合算' }];
+}
+
+function skRange(ym, type) {
+  const y = Number(ym.slice(0, 4)), m = Number(ym.slice(5, 7));
+  if (type === 'end') {
+    const last = new Date(y, m, 0).getDate();
+    return [`${y}-${skPad(m)}-01`, `${y}-${skPad(m)}-${skPad(last)}`];
+  }
+  const py = m === 1 ? y - 1 : y, pm = m === 1 ? 12 : m - 1;
+  return [`${py}-${skPad(pm)}-21`, `${y}-${skPad(m)}-20`];
+}
+
+function skAggregate(all, ym, type, settings) {
+  const [from, to] = skRange(ym, type);
+  const groups = {}, warns = [], workers = [], days = new Set();
+  all.forEach(r => {
+    if (!r.date || r.date < from || r.date > to) return;
+    let used = false;
+    skEntries(r).forEach(e => {
+      const s = settings[e.site] || {};
+      if ((s.t || 'end') !== type) return;
+      used = true;
+      const g = (s.g || '').trim() || e.site;
+      const o = groups[g] || (groups[g] = { name: g, days: new Set(), hours: 0, sites: new Set() });
+      o.days.add(r.date); o.hours += e.hours; o.sites.add(e.site);
+      days.add(r.date);
+      if (e.warn) warns.push(r.date + '　' + e.site + '：' + e.warn);
+    });
+    if (used) (r.workers || []).forEach(w => {
+      if (w.name || w.task) workers.push({ date: r.date, place: skNorm(r.place), name: w.name || '', task: w.task || '' });
+    });
+  });
+  const list = Object.values(groups)
+    .map(o => ({ name: o.name, days: o.days.size, hours: o.hours, sites: [...o.sites] }))
+    .sort((a, b) => b.hours - a.hours);
+  workers.sort((a, b) => a.date.localeCompare(b.date));
+  return { from, to, list, warns, workers, totalDays: days.size, totalHours: list.reduce((a, o) => a + o.hours, 0) };
+}
+// SK-END
+
+async function skLoad() {
+  try { localStorage.getItem(SK_KEY) && (skSettings = JSON.parse(localStorage.getItem(SK_KEY)) || {}); } catch (e) {}
+  try {
+    const s = await window.NippoDB.getSetting('closing');
+    if (s && s.json) skSettings = JSON.parse(s.json) || {};
+  } catch (e) { console.warn('設定の読み込みに失敗（この端末の保存分を使います）', e); }
+}
+
+async function skSave() {
+  try { localStorage.setItem(SK_KEY, JSON.stringify(skSettings)); } catch (e) {}
+  try { await window.NippoDB.putSetting('closing', { json: JSON.stringify(skSettings) }); }
+  catch (e) { showToast('クラウド保存に失敗。この端末にのみ保存しました'); }
+}
+
+function skSetType(t) {
+  skType = t;
+  document.getElementById('sk-t-end').classList.toggle('on', t === 'end');
+  document.getElementById('sk-t-d20').classList.toggle('on', t === 'd20');
+  renderShukei();
+}
+
+function skSetSite(i, field, val) {
+  const site = skSiteList[i];
+  if (!site) return;
+  const cur = skSettings[site] || {};
+  cur[field] = val;
+  skSettings[site] = cur;
+  skSave();
+  if (field === 't') renderShukei();
+}
+
+function skDate(s) { return s.slice(5, 7).replace(/^0/, '') + '/' + s.slice(8, 10).replace(/^0/, ''); }
+
+async function renderShukei() {
+  const ym = document.getElementById('sk-month').value;
+  if (!ym) return;
+  const all = await getAllRecords();
+  const res = skAggregate(all, ym, skType, skSettings);
+  const label = skType === 'end' ? '月末締め' : '20日締め';
+  document.getElementById('sk-period').textContent = `${ym.slice(0, 4)}年${Number(ym.slice(5, 7))}月分（${label}）　${skDate(res.from)} 〜 ${skDate(res.to)}`;
+
+  let html = '';
+  if (!res.list.length) {
+    html = '<div class="empty-state"><div style="font-size:40px;margin-bottom:12px">📭</div><div style="font-size:14px">この締め区分の日報がありません</div></div>';
+  } else {
+    html += `<div class="sk-summary"><div class="sk-box"><div class="n">${res.totalDays}日</div><div class="l">稼働日数</div></div><div class="sk-box"><div class="n">${skFmt(res.totalHours)}h</div><div class="l">合計作業時間</div></div></div>`;
+    html += '<div class="sk-row head"><div>請求先（現場）</div><div class="r">日数</div><div class="r">時間</div></div>';
+    html += res.list.map(o => {
+      const sub = (o.sites.length > 1 || o.sites[0] !== o.name) ? `<div class="sk-sub">${o.sites.map(esc).join(' / ')}</div>` : '';
+      return `<div class="sk-row"><div>${esc(o.name)}${sub}</div><div class="r">${o.days}</div><div class="r">${skFmt(o.hours)}</div></div>`;
+    }).join('');
+    html += `<div class="sk-row" style="font-weight:700"><div>合計</div><div class="r">${res.totalDays}</div><div class="r">${skFmt(res.totalHours)}</div></div>`;
+    if (res.workers.length) {
+      html += '<div class="section-card" style="margin-top:16px"><div class="section-card-title">👥 応援・外注</div>';
+      html += res.workers.map(w => `<div style="font-size:13px;padding:5px 0;border-bottom:1px solid var(--border)">${skDate(w.date)}　${esc(w.name)}${w.task ? ' / ' + esc(w.task) : ''}<div class="sk-sub">${esc(w.place)}</div></div>`).join('');
+      html += '</div>';
+    }
+    html += '<button class="save-btn" style="margin-top:16px" onclick="skExportCSV()">この集計をCSV出力</button>';
+    html += '<div style="font-size:11px;color:var(--text3);margin-top:8px;line-height:1.6">※ 作業時間は「終了−開始」で計算（休憩時間は引いていません）</div>';
+  }
+  document.getElementById('sk-result').innerHTML = html;
+  document.getElementById('sk-warn').innerHTML = res.warns.length ? `<div class="sk-warn">⚠️ 要確認の日報<br>${res.warns.map(esc).join('<br>')}</div>` : '';
+
+  // 設定欄：この月（月末締め・20日締めの両期間）に登場した現場
+  const [f1, t1] = skRange(ym, 'end'), [f2, t2] = skRange(ym, 'd20');
+  const from = f1 < f2 ? f1 : f2, to = t1 > t2 ? t1 : t2;
+  const seen = {};
+  all.forEach(r => {
+    if (!r.date || r.date < from || r.date > to) return;
+    skEntries(r).forEach(e => { if (!seen[e.site] || seen[e.site] < r.date) seen[e.site] = r.date; });
+  });
+  skSiteList = Object.keys(seen).sort((a, b) => seen[b].localeCompare(seen[a]));
+  document.getElementById('sk-settings').innerHTML = skSiteList.map((site, i) => {
+    const s = skSettings[site] || {};
+    return `<div style="margin-bottom:12px"><div style="font-size:13px;font-weight:600;margin-bottom:4px">${esc(site)}</div><div class="sk-set-row"><input type="text" value="${esc(s.g || '')}" placeholder="請求先名（任意）" onchange="skSetSite(${i},'g',this.value)"><select onchange="skSetSite(${i},'t',this.value)"><option value="end"${(s.t || 'end') === 'end' ? ' selected' : ''}>月末締め</option><option value="d20"${s.t === 'd20' ? ' selected' : ''}>20日締め</option></select></div></div>`;
+  }).join('') || '<div style="font-size:13px;color:var(--text3)">この月の日報がありません</div>';
+}
+
+function skExportCSV() {
+  const ym = document.getElementById('sk-month').value;
+  getAllRecords().then(all => {
+    const res = skAggregate(all, ym, skType, skSettings);
+    if (!res.list.length) { showToast('該当する日報がありません'); return; }
+    const q = v => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
+    const lines = [['請求先', '日数', '作業時間(h)', '現場'].map(q).join(',')];
+    res.list.forEach(o => lines.push([o.name, o.days, skFmt(o.hours), o.sites.join(' / ')].map(q).join(',')));
+    lines.push(['合計', res.totalDays, skFmt(res.totalHours), ''].map(q).join(','));
+    const blob = new Blob(['﻿' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `shukei_${ym}_${skType === 'end' ? 'matsu' : '20'}.csv`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast('CSVをダウンロードしました');
+  });
+}
+
 // ========== ユーティリティ ==========
 function esc(s) { return (s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
@@ -651,6 +857,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('exp-start').value = ym + '-01';
   document.getElementById('exp-end').value = todayStr;
   document.getElementById('filter-month').addEventListener('change', renderList);
+  document.getElementById('sk-month').value = ym;
+  document.getElementById('sk-month').addEventListener('change', renderShukei);
+  await skLoad();
   const days = ['日', '月', '火', '水', '木', '金', '土'];
   document.getElementById('header-date').textContent = `${today.getFullYear()}年${today.getMonth() + 1}月${today.getDate()}日（${days[today.getDay()]}）`;
 });
