@@ -126,6 +126,10 @@ html,body{height:100%;font-family:var(--font);background:var(--bg);color:var(--t
   </div>
   <div class="content">
     <div id="sec-nyuuryoku" class="section active">
+      <div id="edit-banner" style="display:none;align-items:center;justify-content:space-between;gap:10px;background:var(--bg2);border-radius:var(--radius);padding:10px 12px;margin-bottom:14px;font-size:13px">
+        <span>✏️ 編集中です。「日報を保存」で上書きされます。</span>
+        <button onclick="cancelEdit()" style="border:1px solid var(--border2);background:none;border-radius:8px;padding:6px 10px;font-size:12px;color:var(--text);font-family:var(--font);cursor:pointer;white-space:nowrap">編集をやめる</button>
+      </div>
       <div class="field"><label>日付</label><input type="date" id="inp-date"></div>
       <div class="field"><label>作業場所</label><input type="text" id="inp-place" placeholder="例：金沢市香林坊○○ビル"></div>
       <div class="field">
@@ -265,6 +269,13 @@ window.NippoDB = {
     if (!dataUrls.length) return;
     await Promise.all(dataUrls.map(url => addDoc(collection(fsdb, 'nippo_photos'), { nippoId, dataUrl: url })));
   },
+  // 編集保存用：新しい写真を先に保存してから、古い写真を消す（途中で失敗しても写真が消えない順序）
+  async replacePhotos(nippoId, dataUrls) {
+    const q = query(collection(fsdb, 'nippo_photos'), where('nippoId', '==', nippoId));
+    const oldSnap = await getDocs(q);
+    await Promise.all(dataUrls.map(url => addDoc(collection(fsdb, 'nippo_photos'), { nippoId, dataUrl: url })));
+    await Promise.all(oldSnap.docs.map(d => deleteDoc(d.ref)));
+  },
   async getPhotos(nippoId) {
     const q = query(collection(fsdb, 'nippo_photos'), where('nippoId', '==', nippoId));
     const snap = await getDocs(q);
@@ -291,6 +302,7 @@ window._dbReadyResolve();
 <script>
 // ========== DB（Firestoreへの薄いラッパー。関数名は元のIndexedDB版と同じにしてある） ==========
 let currentModalId = null;
+let editingId = null; // 編集中の日報ID（保存するまで元の日報は消さない）
 let photos = []; // {file, dataUrl} の配列
 let isRemoteUpdate = false;
 
@@ -480,7 +492,8 @@ async function saveNippo() {
   btn.textContent = '保存中...';
 
   try {
-    const id = Date.now();
+    const isEdit = editingId !== null;
+    const id = isEdit ? editingId : Date.now();
     const record = {
       id, date, place: place || '',
       start: document.getElementById('inp-start').value,
@@ -491,9 +504,10 @@ async function saveNippo() {
       photoCount: photos.length
     };
     await putRecord(record);
-    await savePhotosForNippo(id, [...photos]);
+    if (isEdit) await window.NippoDB.replacePhotos(id, [...photos]);
+    else await savePhotosForNippo(id, [...photos]);
     resetForm();
-    alert('日報を保存しました ✓');
+    alert(isEdit ? '日報を上書き保存しました ✓' : '日報を保存しました ✓');
   } catch (e) {
     alert('保存エラー: ' + e.message);
   } finally {
@@ -502,7 +516,19 @@ async function saveNippo() {
   }
 }
 
+function setEditing(id) {
+  editingId = id;
+  const b = document.getElementById('edit-banner');
+  if (b) b.style.display = id === null ? 'none' : 'flex';
+}
+
+function cancelEdit() {
+  resetForm();
+  showToast('編集をやめました（元の日報はそのまま残っています）');
+}
+
 function resetForm() {
+  setEditing(null);
   ['inp-date', 'inp-place', 'inp-start', 'inp-end', 'inp-content', 'inp-memo'].forEach(id => document.getElementById(id).value = '');
   document.getElementById('inp-date').value = new Date().toISOString().slice(0, 10);
   document.getElementById('worker-list').innerHTML = '';
@@ -614,9 +640,9 @@ async function editFromModal() {
     row.innerHTML = `<input type="text" value="${esc(w.name)}" placeholder="会社名・氏名" style="font-size:14px;font-family:var(--font)"><input type="text" value="${esc(w.task)}" placeholder="担当作業" style="font-size:14px;font-family:var(--font)"><button class="remove-btn" onclick="this.parentNode.remove()">✕</button>`;
     workerList.appendChild(row);
   });
-  await deleteRecordDB(currentModalId);
+  setEditing(currentModalId);
   closeModal();
-  showToast('編集モードで開きました');
+  showToast('編集モードで開きました（保存で上書きされます）');
 }
 
 async function deleteFromModal() {
